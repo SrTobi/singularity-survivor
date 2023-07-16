@@ -14,6 +14,15 @@ const SHIP_HEIGHT: f32 = 25.;
 const SHIP_BASE: f32 = 22.;
 const ROCKET_SIZE: f32 = 8.;
 
+const BULLET_RELOAD_TIME: f64 = 0.5; // sec
+const BULLET_LIFETIME: f64 = 1.5; // sec
+const ROCKET_RELOAD_TIME: f64 = 1.0; // sec
+const ROCKET_LIFETIME: f64 = 4.0; // sec
+
+const ASTEROID_DENSITY: usize = 10;
+
+const SHIP_ROTATION_SPEED: f32 = 4.; // deg/frame
+
 struct Ship {
     pos: Vec2,
     rot: f32,
@@ -112,6 +121,12 @@ pub struct MainState {
     rockets: Vec<Rocket>,
     rocket_side: RocketSide,
     asteroid_shapes: Vec<AsteroidShape>,
+
+    level: usize,
+    xp: usize,
+    next_level_xp: usize,
+
+    rocket_stockpile: usize,
 }
 
 impl MainState {
@@ -126,7 +141,7 @@ impl MainState {
         let asteroid_shapes: Vec<_> = (0..5).map(|_| AsteroidShape::new()).collect();
 
         let mut asteroids = Vec::new();
-        for _ in 0..250 {
+        for _ in 0..(ASTEROID_DENSITY * 5 * 5) {
             let x = rand::gen_range(SHIP_HEIGHT * 10., 2.5 * screen_width());
             let y = rand::gen_range(SHIP_HEIGHT * 10., 2.5 * screen_height());
             let pos = Vec2::new(rand_signum() * x, rand_signum() * y);
@@ -143,6 +158,11 @@ impl MainState {
             rocket_side: RocketSide::Right,
             asteroids,
             asteroid_shapes,
+
+            level: 1,
+            xp: 0,
+            next_level_xp: 3,
+            rocket_stockpile: 2,
         }
     }
 }
@@ -167,7 +187,7 @@ impl GameState for MainState {
         }
 
         // Shot
-        if is_key_down(KeyCode::Space) && frame_t - self.last_shot > 0.5 {
+        if is_key_down(KeyCode::Space) && frame_t - self.last_shot > BULLET_RELOAD_TIME {
             let rot_vec = vec_from_rot(rotation);
             self.bullets.push(Bullet {
                 pos: self.ship.pos + rot_vec * SHIP_HEIGHT / 2.,
@@ -179,7 +199,8 @@ impl GameState for MainState {
         }
 
         // shoot rocket
-        if is_key_down(KeyCode::LeftAlt) && frame_t - self.last_shot > 0.01 {
+        if is_key_down(KeyCode::LeftAlt) && frame_t - self.last_shot > ROCKET_RELOAD_TIME && self.rocket_stockpile > 0 {
+            self.rocket_stockpile -= 1;
             let sf = match self.rocket_side {
                 RocketSide::Left => -1.,
                 RocketSide::Right => 1.,
@@ -199,9 +220,9 @@ impl GameState for MainState {
 
         // Steer
         if is_key_down(KeyCode::Right) {
-            self.ship.rot += 4.;
+            self.ship.rot += SHIP_ROTATION_SPEED;
         } else if is_key_down(KeyCode::Left) {
-            self.ship.rot -= 4.;
+            self.ship.rot -= SHIP_ROTATION_SPEED;
         }
 
         // Euler integration
@@ -291,6 +312,11 @@ impl GameState for MainState {
 
             if let Some(hit_vel) = hit_vel {
                 asteroid.collided = true;
+                self.xp += 1;
+
+                if rand::gen_range(0, 2) == 0 {
+                    self.rocket_stockpile += 1;
+                }
 
                 // Break the asteroid
                 if asteroid.sides > 3 {
@@ -322,7 +348,7 @@ impl GameState for MainState {
         // generate new asteroids
         if self.last_asteroid_generate_pos.distance(self.ship.pos) > 50. {
             let gen_vec = self.ship.pos - self.last_asteroid_generate_pos;
-            let asteroid_per_pixel = 10. / (screen_height() * screen_width());
+            let asteroid_per_pixel = ASTEROID_DENSITY as f32 / (screen_height() * screen_width());
             let new_x_pixel = gen_vec.x.abs() * screen_height();
             let new_y_pixel = gen_vec.y.abs() * screen_width();
             let new_pixels = 5. * new_x_pixel + 5. * new_y_pixel - gen_vec.x * gen_vec.y;
@@ -360,13 +386,21 @@ impl GameState for MainState {
 
         // Remove the collided objects
         self.bullets
-            .retain(|bullet| bullet.shot_at + 1.5 > frame_t && !bullet.collided);
+            .retain(|bullet| bullet.shot_at + BULLET_LIFETIME > frame_t && !bullet.collided);
         self.rockets
-            .retain(|rocket| rocket.shot_at + 4. > frame_t && !rocket.collided);
+            .retain(|rocket| rocket.shot_at + ROCKET_LIFETIME > frame_t && !rocket.collided);
         self.asteroids.retain(|asteroid| {
             !asteroid.collided && self.ship.pos.distance(asteroid.pos) < world_diag_length / 2.
         });
         self.asteroids.append(&mut new_asteroids);
+
+        // update level
+        while self.xp >= self.next_level_xp {
+            self.level += 1;
+            self.xp -= self.next_level_xp;
+            self.next_level_xp = 1 + (self.next_level_xp as f32 * 1.2) as usize;
+            self.rocket_stockpile += rand::gen_range(0, 4);
+        } 
 
         // You win?
         if self.asteroids.len() == 0 {
@@ -471,6 +505,22 @@ impl GameState for MainState {
             ),
             30.,
             30.,
+            30.,
+            BLACK,
+        );
+
+        draw_text(
+            &format!("Level {}, XP no next Level: {}", self.level, self.next_level_xp - self.xp),
+            30.,
+            65.,
+            30.,
+            BLACK,
+        );
+
+        draw_text(
+            &format!("Missiles: {}", self.rocket_stockpile),
+            30.,
+            95.,
             30.,
             BLACK,
         );
