@@ -373,10 +373,12 @@ impl GameState for MainState {
             return Some(Box::new(MenuState::Won));
         }
 
-        let cam_pos = self.ship.pos - Vec2::new(screen_width(), -screen_height()) / 2.;
-        let rect = Rect::new(cam_pos.x, cam_pos.y, screen_width(), -screen_height());
-        let camera = Camera2D::from_display_rect(rect);
-        set_camera(&camera);
+        fn make_camera(pos: Vec2) -> Camera2D {
+            let cam_pos = pos - Vec2::new(screen_width(), -screen_height()) / 2.;
+            let rect = Rect::new(cam_pos.x, cam_pos.y, screen_width(), -screen_height());
+            Camera2D::from_display_rect(rect)
+        }
+
         clear_background(LIGHTGRAY);
 
         let in_screen = |pos: Vec2, size: f32| {
@@ -384,27 +386,33 @@ impl GameState for MainState {
         };
 
         // render stars
-        {
-            let start = self.ship.pos - 0.6 * screen_size;
-            let end = self.ship.pos + 0.6 * screen_size;
-            fn c(n: f32) -> i64 {
+        let render_stars = |pos: Vec2, step: i64| {
+            set_camera(&make_camera(pos));
+            let start: Vec2 = pos - 0.6 * screen_size;
+            let end = pos + 0.6 * screen_size;
+            let c = |n: f32| -> i64 {
                 let n = n as i64;
-                n - n % 100
-            }
-            for x in (c(start.x)..c(end.x)).step_by(100) {
-                for y in (c(start.y)..c(end.y)).step_by(100) {
+                n - n % step
+            };
+            for x in (c(start.x)..c(end.x)).step_by(step as usize) {
+                for y in (c(start.y)..c(end.y)).step_by(step as usize) {
                     let mut hasher = DefaultHasher::new();
                     (x, y).hash(&mut hasher);
                     let result = hasher.finish();
 
-                    let x = x + (result.wrapping_mul(11) % 100) as i64 - 50;
-                    let y = y + (result.wrapping_mul(31) % 100) as i64 - 50;
-
+                    let x = x + (result.wrapping_mul(11) % step as u64) as i64 - step / 2;
+                    let y = y + (result.wrapping_mul(31) % step as u64) as i64 - step / 2;
 
                     draw_circle(x as f32, y as f32, 2., GRAY);
                 }
             }
-        }
+        };
+
+        render_stars(Vec2::new(2000., 2000.) + self.ship.pos / 4., 400);
+        render_stars(Vec2::new(1000., 1000.) + self.ship.pos / 2., 200);
+        render_stars(self.ship.pos, 150);
+
+        set_camera(&make_camera(self.ship.pos));
 
         for bullet in self.bullets.iter() {
             if in_screen(bullet.pos, 2.) {
