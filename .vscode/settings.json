@@ -1,0 +1,5 @@
+{
+    "lldb.launch.initCommands": [
+        "command script import formatters",
+    ]
+}
