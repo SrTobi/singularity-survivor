@@ -1,4 +1,8 @@
-use std::f32::consts::PI;
+use std::{
+    collections::hash_map::DefaultHasher,
+    f32::consts::PI,
+    hash::{Hash, Hasher},
+};
 
 use macroquad::prelude::*;
 
@@ -145,8 +149,8 @@ impl MainState {
 
 impl GameState for MainState {
     fn do_frame(&mut self) -> Option<Box<dyn GameState>> {
-        let screen_diag_length_squared =
-            Vec2::new(screen_width(), screen_height()).length_squared();
+        let screen_size = Vec2::new(screen_width(), screen_height());
+        let screen_diag_length_squared = screen_size.length_squared();
         let screen_diag_length = screen_diag_length_squared.sqrt();
         let world_diag_length = screen_diag_length * 5.;
 
@@ -378,6 +382,29 @@ impl GameState for MainState {
         let in_screen = |pos: Vec2, size: f32| {
             pos.distance(self.ship.pos) < screen_diag_length / 2. + SHIP_HEIGHT + size
         };
+
+        // render stars
+        {
+            let start = self.ship.pos - 0.6 * screen_size;
+            let end = self.ship.pos + 0.6 * screen_size;
+            fn c(n: f32) -> i64 {
+                let n = n as i64;
+                n - n % 100
+            }
+            for x in (c(start.x)..c(end.x)).step_by(100) {
+                for y in (c(start.y)..c(end.y)).step_by(100) {
+                    let mut hasher = DefaultHasher::new();
+                    (x, y).hash(&mut hasher);
+                    let result = hasher.finish();
+
+                    let x = x + (result.wrapping_mul(11) % 100) as i64 - 50;
+                    let y = y + (result.wrapping_mul(31) % 100) as i64 - 50;
+
+
+                    draw_circle(x as f32, y as f32, 2., GRAY);
+                }
+            }
+        }
 
         for bullet in self.bullets.iter() {
             if in_screen(bullet.pos, 2.) {
