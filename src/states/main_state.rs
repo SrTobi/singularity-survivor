@@ -225,7 +225,10 @@ impl GameState for MainState {
 
                     // steer rocket
                     let target = self.asteroids.iter().min_by_key(|a| {
-                        (rrot.angle_between(a.pos - rocket.pos) * 100000.).abs() as i64
+                        let angle = rrot.angle_between(a.pos - rocket.pos).to_degrees().abs();
+                        let angle = (angle as i32).max(20);
+
+                        (angle, a.pos.distance(rocket.pos) as i32)
                     });
 
                     if let Some(target) = target {
