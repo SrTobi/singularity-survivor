@@ -1,5 +1,5 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::hash_map::DefaultHasher,
     f32::consts::PI,
     hash::{Hash, Hasher},
@@ -19,9 +19,16 @@ const ROCKET_SIZE: f32 = 8.;
 const BULLET_LIFETIME: f32 = 1.5; // sec
 const ROCKET_LIFETIME: f32 = 4.0; // sec
 
-const ASTEROID_DENSITY: usize = 10;
+const ASTEROID_DENSITY: usize = 4;
 
 const SHIP_ROTATION_SPEED: f32 = 4.; // deg/frame
+
+trait BlackHoleEffected {
+    fn pos(&self) -> Vec2;
+    fn vel(&mut self) -> &mut Vec2;
+    fn radius(&self) -> f32;
+    fn collide(&mut self);
+}
 
 struct Ship {
     pos: Vec2,
@@ -29,11 +36,45 @@ struct Ship {
     vel: Vec2,
 }
 
+impl BlackHoleEffected for Ship {
+    fn pos(&self) -> Vec2 {
+        self.pos
+    }
+
+    fn vel(&mut self) -> &mut Vec2 {
+        &mut self.vel
+    }
+
+    fn radius(&self) -> f32 {
+        SHIP_HEIGHT / 3.
+    }
+
+    fn collide(&mut self) {}
+}
+
 struct Bullet {
     pos: Vec2,
     vel: Vec2,
     shot_at: f32,
     collided: bool,
+}
+
+impl BlackHoleEffected for Bullet {
+    fn pos(&self) -> Vec2 {
+        self.pos
+    }
+
+    fn vel(&mut self) -> &mut Vec2 {
+        &mut self.vel
+    }
+
+    fn radius(&self) -> f32 {
+        2.
+    }
+
+    fn collide(&mut self) {
+        self.collided = true;
+    }
 }
 
 struct Asteroid {
@@ -45,6 +86,24 @@ struct Asteroid {
     sides: u8,
     collided: bool,
     shape_idx: usize,
+}
+
+impl BlackHoleEffected for Asteroid {
+    fn pos(&self) -> Vec2 {
+        self.pos
+    }
+
+    fn vel(&mut self) -> &mut Vec2 {
+        &mut self.vel
+    }
+
+    fn radius(&self) -> f32 {
+        self.size
+    }
+
+    fn collide(&mut self) {
+        self.collided = true;
+    }
 }
 
 impl Asteroid {
@@ -69,6 +128,41 @@ struct Rocket {
     collided: bool,
     shot_at: f32,
     steer: bool,
+}
+
+impl BlackHoleEffected for Rocket {
+    fn pos(&self) -> Vec2 {
+        self.pos
+    }
+
+    fn vel(&mut self) -> &mut Vec2 {
+        &mut self.vel
+    }
+
+    fn radius(&self) -> f32 {
+        5.
+    }
+
+    fn collide(&mut self) {
+        self.collided = true;
+    }
+}
+
+struct BlackHole {
+    pos: Cell<Vec2>,
+    vel: Cell<Vec2>,
+    size: f32,
+    collided: Cell<bool>,
+}
+
+impl BlackHole {
+    fn pos(&self) -> Vec2 {
+        self.pos.get()
+    }
+
+    fn vel(&self) -> Vec2 {
+        self.vel.get()
+    }
 }
 
 struct Upgrade {
@@ -227,6 +321,8 @@ pub struct MainState {
     rocket_side: RocketSide,
     asteroid_shapes: Vec<AsteroidShape>,
 
+    black_holes: Vec<BlackHole>,
+
     level_up: Option<LevelUp>,
     level: usize,
     xp: usize,
@@ -282,6 +378,8 @@ impl MainState {
             rocket_side: RocketSide::Right,
             asteroids,
             asteroid_shapes,
+
+            black_holes: Vec::new(),
 
             level_up: None,
             level: 1,
@@ -348,7 +446,7 @@ impl MainState {
         } else if is_key_down(KeyCode::Down) && self.has_brakes {
             -self.ship.vel / 20. // Break
         } else {
-            -self.ship.vel / 100. // Friction
+            -self.ship.vel / 1000. // Friction
         };
 
         // Shot
@@ -507,10 +605,6 @@ impl MainState {
                 asteroid.collided = true;
                 self.xp += 1;
 
-                if rand::gen_range(0, 2) == 0 {
-                    self.rocket_stockpile += 1;
-                }
-
                 // Break the asteroid
                 if asteroid.sides > 3 {
                     new_asteroids.push(Asteroid {
@@ -539,6 +633,67 @@ impl MainState {
         }
 
         self.colliding = colliding;
+
+        let mut new_black_holes = Vec::new();
+
+        for (i, bh1) in self.black_holes.iter().enumerate() {
+            for (j, bh2) in self.black_holes.iter().enumerate() {
+                if i > j {
+                    let dist = bh1.pos().distance(bh2.pos());
+                    let dist_vec = bh2.pos() - bh1.pos();
+                    let comb_size = bh1.size + bh2.size;
+                    bh1.vel
+                        .set(bh1.vel() + dist_vec.normalize() * (70. * comb_size / dist.powi(2)));
+                    bh2.vel
+                        .set(bh2.vel() - dist_vec.normalize() * (70. * comb_size / dist.powi(2)));
+
+                    if bh1.pos().distance(bh2.pos()) < comb_size {
+                        bh1.collided.set(true);
+                        bh2.collided.set(true);
+                        new_black_holes.push(BlackHole {
+                            pos: Cell::new(bh1.pos() + (bh2.size / comb_size) * dist_vec),
+                            vel: Cell::new(
+                                (bh1.size / comb_size) * bh1.vel()
+                                    + (bh2.size / comb_size) * bh2.vel(),
+                            ),
+                            collided: Cell::new(false),
+                            size: comb_size.min(400.), // this is so not how physics works
+                        })
+                    }
+                }
+            }
+        }
+
+        for bh in self.black_holes.iter() {
+            bh.pos.set(bh.pos() + bh.vel());
+
+            fn affect_obj(bh: &BlackHole, obj: &mut impl BlackHoleEffected) -> bool {
+                let pos = obj.pos();
+                let dist = bh.pos().distance(pos);
+                *obj.vel() += (bh.pos() - pos).normalize() * (70. * bh.size / dist.powi(2));
+
+                let collided = dist < bh.size + obj.radius();
+
+                if collided {
+                    obj.collide();
+                }
+
+                collided
+            }
+
+            fn affect_objs(bh: &BlackHole, objs: &mut Vec<impl BlackHoleEffected>) {
+                for obj in objs.iter_mut() {
+                    affect_obj(bh, obj);
+                }
+            }
+
+            affect_objs(bh, &mut self.bullets);
+            affect_objs(bh, &mut self.rockets);
+            affect_objs(bh, &mut self.asteroids);
+            if affect_obj(bh, &mut self.ship) {
+                return Some(Box::new(MenuState::Lost));
+            }
+        }
 
         // generate new asteroids
         if self.last_asteroid_generate_pos.distance(self.ship.pos) > 50. {
@@ -603,24 +758,47 @@ impl MainState {
             !asteroid.collided && self.ship.pos.distance(asteroid.pos) < world_diag_length / 2.
         });
         self.asteroids.append(&mut new_asteroids);
+        self.black_holes.retain(|bh| {
+            !bh.collided.get() && self.ship.pos.distance(bh.pos()) < world_diag_length / 2.
+        });
+        self.black_holes.append(&mut new_black_holes);
+
+        while self.black_holes.len() < (self.level + 5) / 10 {
+            // self.level / 10 {
+            let pos = self.ship.pos
+                + Vec2::from_angle(rand::gen_range(0.0_f32, 360.).to_radians())
+                    * rand::gen_range(screen_diag_length * 0.4, screen_diag_length * 2.);
+            let rand_vec = Vec2::new(
+                rand::gen_range(-0.5, 0.5) * screen_width(),
+                rand::gen_range(-0.5, 0.5) * screen_height(),
+            );
+            let bh = BlackHole {
+                pos: Cell::new(pos),
+                vel: Cell::new(
+                    ((self.ship.pos + rand_vec) - pos).normalize() * rand::gen_range(1., 3.),
+                ),
+                size: rand::gen_range(5., 20.),
+                collided: Cell::new(false),
+            };
+            self.black_holes.push(bh);
+        }
 
         // update level
         while self.xp >= self.next_level_xp {
             self.level += 1;
             self.xp -= self.next_level_xp;
-            self.next_level_xp = 1 + (self.next_level_xp as f32 * 1.2) as usize;
-            self.rocket_stockpile += rand::gen_range(0, 4);
+            self.next_level_xp = ((self.next_level_xp as f32 * 1.1) as usize).max(self.next_level_xp + 1);
 
-            self.hostile_asteroids_per_second *= 1.25;
-            self.max_hostile_asteroid_speed *= 1.1;
+            self.hostile_asteroids_per_second *= 1.2;
+            self.max_hostile_asteroid_speed *= 1.08;
 
             self.level_up = Some(LevelUp::new(3, self.available_upgrades.clone()))
         }
 
         // You win?
-        if self.asteroids.len() == 0 {
+        /*if self.asteroids.len() == 0 {
             return Some(Box::new(MenuState::Won));
-        }
+        }*/
 
         None
     }
@@ -670,6 +848,10 @@ impl MainState {
         render_stars(self.ship.pos, 150);
 
         set_camera(&make_camera(self.ship.pos));
+
+        for bh in self.black_holes.iter() {
+            draw_circle(bh.pos().x, bh.pos().y, bh.size, BLACK);
+        }
 
         for bullet in self.bullets.iter() {
             if in_screen(bullet.pos, 2.) {
