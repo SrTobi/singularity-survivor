@@ -4,9 +4,9 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use macroquad::prelude::*;
+use macroquad::{prelude::*, ui::root_ui};
 
-use crate::GameState;
+use crate::{utils::draw_centered_text, GameState};
 
 use super::menu_state::MenuState;
 
@@ -112,6 +112,8 @@ impl RocketSide {
 }
 
 pub struct MainState {
+    paused: bool,
+    game_t: f64,
     ship: Ship,
     last_asteroid_generate_pos: Vec2,
     generated_asteroids: usize,
@@ -149,12 +151,14 @@ impl MainState {
         }
 
         Self {
+            game_t: 0.,
+            paused: false,
             last_asteroid_generate_pos: ship.pos,
             ship,
             generated_asteroids: asteroids.len(),
             bullets: Vec::new(),
             rockets: Vec::new(),
-            last_shot: get_time(),
+            last_shot: 0.,
             rocket_side: RocketSide::Right,
             asteroids,
             asteroid_shapes,
@@ -165,16 +169,23 @@ impl MainState {
             rocket_stockpile: 2,
         }
     }
-}
 
-impl GameState for MainState {
-    fn do_frame(&mut self) -> Option<Box<dyn GameState>> {
+    fn update(&mut self) -> Option<Box<dyn GameState>> {
+        if is_key_pressed(KeyCode::P) {
+            self.paused = !self.paused
+        }
+
+        if self.paused {
+            return None;
+        }
+
+        let frame_t = get_frame_time() as f64;
+        self.game_t += frame_t;
+        let game_t = self.game_t;
+
         let screen_size = Vec2::new(screen_width(), screen_height());
-        let screen_diag_length_squared = screen_size.length_squared();
-        let screen_diag_length = screen_diag_length_squared.sqrt();
+        let screen_diag_length = screen_size.length();
         let world_diag_length = screen_diag_length * 5.;
-
-        let frame_t = get_time();
         let rotation = self.ship.rot.to_radians();
 
         let mut acc = -self.ship.vel / 100.; // Friction
@@ -187,19 +198,22 @@ impl GameState for MainState {
         }
 
         // Shot
-        if is_key_down(KeyCode::Space) && frame_t - self.last_shot > BULLET_RELOAD_TIME {
+        if is_key_down(KeyCode::Space) && game_t - self.last_shot > BULLET_RELOAD_TIME {
             let rot_vec = vec_from_rot(rotation);
             self.bullets.push(Bullet {
                 pos: self.ship.pos + rot_vec * SHIP_HEIGHT / 2.,
                 vel: rot_vec * 10.,
-                shot_at: frame_t,
+                shot_at: game_t,
                 collided: false,
             });
-            self.last_shot = frame_t;
+            self.last_shot = game_t;
         }
 
         // shoot rocket
-        if is_key_down(KeyCode::LeftAlt) && frame_t - self.last_shot > ROCKET_RELOAD_TIME && self.rocket_stockpile > 0 {
+        if is_key_down(KeyCode::LeftAlt)
+            && game_t - self.last_shot > ROCKET_RELOAD_TIME
+            && self.rocket_stockpile > 0
+        {
             self.rocket_stockpile -= 1;
             let sf = match self.rocket_side {
                 RocketSide::Left => -1.,
@@ -211,11 +225,11 @@ impl GameState for MainState {
                 pos: self.ship.pos + rot_vec * SHIP_HEIGHT / 2.,
                 vel: self.ship.vel * 0.9 + rot_vec * rand::gen_range(0.7, 1.2),
                 rot: self.ship.rot,
-                shot_at: frame_t,
+                shot_at: game_t,
                 collided: false,
                 steer: false,
             });
-            self.last_shot = frame_t;
+            self.last_shot = game_t;
         }
 
         // Steer
@@ -241,7 +255,7 @@ impl GameState for MainState {
 
         // Move each rocket
         for rocket in self.rockets.iter_mut() {
-            if rocket.shot_at + 0.3 < frame_t {
+            if rocket.shot_at + 0.3 < game_t {
                 if rocket.vel.length() > 8. {
                     rocket.steer = true;
                 }
@@ -281,7 +295,7 @@ impl GameState for MainState {
         }
 
         // Bullet lifetime
-        self.bullets.retain(|bullet| bullet.shot_at + 2.5 > frame_t);
+        self.bullets.retain(|bullet| bullet.shot_at + 2.5 > game_t);
 
         let mut new_asteroids = Vec::new();
         for asteroid in self.asteroids.iter_mut() {
@@ -386,9 +400,9 @@ impl GameState for MainState {
 
         // Remove the collided objects
         self.bullets
-            .retain(|bullet| bullet.shot_at + BULLET_LIFETIME > frame_t && !bullet.collided);
+            .retain(|bullet| bullet.shot_at + BULLET_LIFETIME > game_t && !bullet.collided);
         self.rockets
-            .retain(|rocket| rocket.shot_at + ROCKET_LIFETIME > frame_t && !rocket.collided);
+            .retain(|rocket| rocket.shot_at + ROCKET_LIFETIME > game_t && !rocket.collided);
         self.asteroids.retain(|asteroid| {
             !asteroid.collided && self.ship.pos.distance(asteroid.pos) < world_diag_length / 2.
         });
@@ -400,12 +414,20 @@ impl GameState for MainState {
             self.xp -= self.next_level_xp;
             self.next_level_xp = 1 + (self.next_level_xp as f32 * 1.2) as usize;
             self.rocket_stockpile += rand::gen_range(0, 4);
-        } 
+        }
 
         // You win?
         if self.asteroids.len() == 0 {
             return Some(Box::new(MenuState::Won));
         }
+
+        None
+    }
+
+    fn render(&self) {
+        let screen_size = Vec2::new(screen_width(), screen_height());
+        let screen_diag_length = screen_size.length();
+        let rotation = self.ship.rot.to_radians();
 
         fn make_camera(pos: Vec2) -> Camera2D {
             let cam_pos = pos - Vec2::new(screen_width(), -screen_height()) / 2.;
@@ -497,11 +519,24 @@ impl GameState for MainState {
 
         draw_text(
             &format!(
-                "Asteroids: {} ({}), Bullets: {}, Rockets: {}",
+                "Fps: {}, Asteroids: {} ({}), Bullets: {}, Rockets: {}",
+                get_fps(),
                 self.asteroids.len(),
                 self.generated_asteroids,
                 self.bullets.len(),
                 self.rockets.len()
+            ),
+            30.,
+            screen_height() - 30.,
+            30.,
+            BLACK,
+        );
+
+        draw_text(
+            &format!(
+                "Level {}, XP no next Level: {}",
+                self.level,
+                self.next_level_xp - self.xp
             ),
             30.,
             30.,
@@ -510,22 +545,41 @@ impl GameState for MainState {
         );
 
         draw_text(
-            &format!("Level {}, XP no next Level: {}", self.level, self.next_level_xp - self.xp),
-            30.,
-            65.,
-            30.,
-            BLACK,
-        );
-
-        draw_text(
             &format!("Missiles: {}", self.rocket_stockpile),
             30.,
-            95.,
+            60.,
             30.,
             BLACK,
         );
 
-        None
+        if self.paused {
+            draw_rectangle(
+                screen_width() / 2. - 100.,
+                screen_height() / 2. - 30.,
+                200.,
+                60.,
+                LIGHTGRAY,
+            );
+            draw_centered_text(
+                "PAUSE",
+                screen_width() / 2.,
+                screen_height() / 2.,
+                50.,
+                BLACK,
+            );
+        }
+    }
+}
+
+impl GameState for MainState {
+    fn do_frame(&mut self) -> Option<Box<dyn GameState>> {
+        let new_state = self.update();
+
+        if new_state.is_none() {
+            self.render();
+        }
+
+        new_state
     }
 }
 

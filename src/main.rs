@@ -2,6 +2,7 @@ use macroquad::prelude::*;
 use states::menu_state::MenuState;
 
 mod states;
+mod utils;
 
 pub trait GameState {
     fn do_frame(&mut self) -> Option<Box<dyn GameState>>;
