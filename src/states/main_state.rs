@@ -1,10 +1,12 @@
 use std::{
+    cell::Cell,
     collections::hash_map::DefaultHasher,
     f32::consts::PI,
     hash::{Hash, Hasher},
+    rc::Rc,
 };
 
-use macroquad::{prelude::*, ui::root_ui};
+use macroquad::prelude::*;
 
 use crate::{utils::draw_centered_text, GameState};
 
@@ -14,10 +16,8 @@ const SHIP_HEIGHT: f32 = 25.;
 const SHIP_BASE: f32 = 22.;
 const ROCKET_SIZE: f32 = 8.;
 
-const BULLET_RELOAD_TIME: f64 = 0.5; // sec
-const BULLET_LIFETIME: f64 = 1.5; // sec
-const ROCKET_RELOAD_TIME: f64 = 1.0; // sec
-const ROCKET_LIFETIME: f64 = 4.0; // sec
+const BULLET_LIFETIME: f32 = 1.5; // sec
+const ROCKET_LIFETIME: f32 = 4.0; // sec
 
 const ASTEROID_DENSITY: usize = 10;
 
@@ -32,7 +32,7 @@ struct Ship {
 struct Bullet {
     pos: Vec2,
     vel: Vec2,
-    shot_at: f64,
+    shot_at: f32,
     collided: bool,
 }
 
@@ -67,8 +67,108 @@ struct Rocket {
     vel: Vec2,
     rot: f32,
     collided: bool,
-    shot_at: f64,
+    shot_at: f32,
     steer: bool,
+}
+
+struct Upgrade {
+    desc: Box<dyn Fn(&MainState) -> String>,
+    effect: Box<dyn Fn(&mut MainState) -> bool>,
+}
+
+impl Upgrade {
+    fn new(
+        desc: impl Fn(&MainState) -> String + 'static,
+        effect: impl Fn(&mut MainState) -> bool + 'static,
+    ) -> Rc<Self> {
+        Rc::new(Self {
+            desc: Box::new(desc),
+            effect: Box::new(effect),
+        })
+    }
+
+    fn simple(desc: &str, effect: impl Fn(&mut MainState) -> bool + 'static) -> Rc<Self> {
+        let desc = desc.to_string();
+        Self::new(move |_| desc.clone(), effect)
+    }
+}
+
+fn make_upgrades() -> Vec<Rc<Upgrade>> {
+    vec![
+        Upgrade::simple("Install brakes", |s| {
+            s.has_brakes = true;
+            false
+        }),
+        {
+            let next_rockets = Rc::new(Cell::new(5));
+            let next_rockets2 = next_rockets.clone();
+
+            Upgrade::new(
+                move |_| format!("+{} Missiles", next_rockets.get()),
+                move |s| {
+                    let new_rockets = next_rockets2.get();
+                    s.rocket_stockpile += new_rockets;
+                    next_rockets2.set(new_rockets + 5);
+                    true
+                },
+            )
+        },
+        Upgrade::simple("-20% Missle reload time", |s| {
+            s.rocket_reload_time *= 0.8;
+            s.rocket_reload_time > 0.05
+        }),
+        Upgrade::simple("-20% Bullet reload time", |s| {
+            s.bullet_reload_time *= 0.8;
+            s.bullet_reload_time > 0.05
+        }),
+        Upgrade::simple("+0.3 Missile production/s", |s| {
+            s.rocket_production_per_sec += 0.3;
+            true
+        }),
+        Upgrade::new(
+            |s| {
+                if s.shield_regeneration_per_sec == 0. {
+                    "Install Shields".to_string()
+                } else {
+                    "+0.5 Shield production/min".to_string()
+                }
+            },
+            |s| {
+                if s.shield_regeneration_per_sec == 0. {
+                    s.shields = 1.;
+                    s.shield_regeneration_per_sec = 0.1 / 60.;
+                } else {
+                    s.shield_regeneration_per_sec += 0.5 / 60.;
+                }
+                true
+            },
+        ),
+    ]
+}
+
+struct LevelUp {
+    selected: usize,
+    upgrade_choices: Vec<Rc<Upgrade>>,
+}
+
+impl LevelUp {
+    fn new(choices: usize, mut available_upgrades: Vec<Rc<Upgrade>>) -> Self {
+        let mut upgrade_choices = Vec::new();
+
+        for _ in 0..choices {
+            if available_upgrades.is_empty() {
+                break;
+            }
+
+            let i = rand::gen_range(0, available_upgrades.len());
+            upgrade_choices.push(available_upgrades.remove(i));
+        }
+
+        Self {
+            selected: 0,
+            upgrade_choices,
+        }
+    }
 }
 
 /*fn wrap_around(v: &Vec2) -> Vec2 {
@@ -113,22 +213,39 @@ impl RocketSide {
 
 pub struct MainState {
     paused: bool,
-    game_t: f64,
+    game_t: f32,
     ship: Ship,
+    invulnerable_until: f32,
+    colliding: bool,
     last_asteroid_generate_pos: Vec2,
     generated_asteroids: usize,
     bullets: Vec<Bullet>,
-    last_shot: f64,
+    last_bullet_shot: f32,
+    last_rocket_shot: f32,
     asteroids: Vec<Asteroid>,
     rockets: Vec<Rocket>,
     rocket_side: RocketSide,
     asteroid_shapes: Vec<AsteroidShape>,
 
+    level_up: Option<LevelUp>,
     level: usize,
     xp: usize,
     next_level_xp: usize,
+    hostile_asteroids_per_second: f32,
+    new_hostile_asteroids: f32,
+    max_hostile_asteroid_speed: f32,
 
+    available_upgrades: Vec<Rc<Upgrade>>,
+    has_brakes: bool,
+
+    shields: f32,
+    shield_regeneration_per_sec: f32,
     rocket_stockpile: usize,
+    rocket_production_progress: f32,
+    rocket_production_per_sec: f32,
+
+    bullet_reload_time: f32,
+    rocket_reload_time: f32,
 }
 
 impl MainState {
@@ -154,23 +271,61 @@ impl MainState {
             game_t: 0.,
             paused: false,
             last_asteroid_generate_pos: ship.pos,
+            invulnerable_until: 0.,
+            colliding: false,
             ship,
             generated_asteroids: asteroids.len(),
             bullets: Vec::new(),
             rockets: Vec::new(),
-            last_shot: 0.,
+            last_bullet_shot: 0.,
+            last_rocket_shot: 0.,
             rocket_side: RocketSide::Right,
             asteroids,
             asteroid_shapes,
 
+            level_up: None,
             level: 1,
             xp: 0,
             next_level_xp: 3,
+            hostile_asteroids_per_second: 4. / 60.,
+            new_hostile_asteroids: 0.,
+            max_hostile_asteroid_speed: 1.,
+
+            available_upgrades: make_upgrades(),
+
+            shields: 0.,
+            shield_regeneration_per_sec: 0.,
+
             rocket_stockpile: 2,
+            rocket_production_progress: 0.,
+            rocket_production_per_sec: 0.,
+            has_brakes: false,
+
+            bullet_reload_time: 0.5,
+            rocket_reload_time: 1.,
         }
     }
 
     fn update(&mut self) -> Option<Box<dyn GameState>> {
+        if let Some(level_up) = &mut self.level_up {
+            if is_key_pressed(KeyCode::Enter) {
+                let upgrade = level_up.upgrade_choices[level_up.selected].clone();
+                self.level_up = None;
+
+                if !(upgrade.effect)(self) {
+                    self.available_upgrades.retain(|u| !Rc::ptr_eq(u, &upgrade))
+                }
+            } else {
+                if is_key_pressed(KeyCode::Down) {
+                    level_up.selected += 1;
+                } else if is_key_pressed(KeyCode::Up) {
+                    level_up.selected = level_up.upgrade_choices.len() + level_up.selected - 1;
+                }
+                level_up.selected = level_up.selected % level_up.upgrade_choices.len();
+                return None;
+            }
+        }
+
         if is_key_pressed(KeyCode::P) {
             self.paused = !self.paused
         }
@@ -179,7 +334,7 @@ impl MainState {
             return None;
         }
 
-        let frame_t = get_frame_time() as f64;
+        let frame_t: f32 = get_frame_time();
         self.game_t += frame_t;
         let game_t = self.game_t;
 
@@ -187,18 +342,17 @@ impl MainState {
         let screen_diag_length = screen_size.length();
         let world_diag_length = screen_diag_length * 5.;
         let rotation = self.ship.rot.to_radians();
-
-        let mut acc = -self.ship.vel / 100.; // Friction
-
         // Forward
-        if is_key_down(KeyCode::Up) {
-            acc = vec_from_rot(rotation) / 3.;
-        } else if is_key_down(KeyCode::Down) {
-            acc = -vec_from_rot(rotation) / 5.;
-        }
+        let acc = if is_key_down(KeyCode::Up) {
+            vec_from_rot(rotation) / 3.
+        } else if is_key_down(KeyCode::Down) && self.has_brakes {
+            -self.ship.vel / 20. // Break
+        } else {
+            -self.ship.vel / 100. // Friction
+        };
 
         // Shot
-        if is_key_down(KeyCode::Space) && game_t - self.last_shot > BULLET_RELOAD_TIME {
+        if is_key_down(KeyCode::Space) && game_t - self.last_bullet_shot > self.bullet_reload_time {
             let rot_vec = vec_from_rot(rotation);
             self.bullets.push(Bullet {
                 pos: self.ship.pos + rot_vec * SHIP_HEIGHT / 2.,
@@ -206,12 +360,12 @@ impl MainState {
                 shot_at: game_t,
                 collided: false,
             });
-            self.last_shot = game_t;
+            self.last_bullet_shot = game_t;
         }
 
         // shoot rocket
         if is_key_down(KeyCode::LeftAlt)
-            && game_t - self.last_shot > ROCKET_RELOAD_TIME
+            && game_t - self.last_rocket_shot > self.rocket_reload_time
             && self.rocket_stockpile > 0
         {
             self.rocket_stockpile -= 1;
@@ -229,8 +383,19 @@ impl MainState {
                 collided: false,
                 steer: false,
             });
-            self.last_shot = game_t;
+            self.last_rocket_shot = game_t;
         }
+
+        // produce rockets
+        self.rocket_production_progress += self.rocket_production_per_sec * frame_t;
+        if self.rocket_production_progress >= 1. {
+            let new_rockets = self.rocket_production_progress as usize;
+            self.rocket_production_progress -= new_rockets as f32;
+            self.rocket_stockpile += new_rockets;
+        }
+
+        // regenerate shields
+        self.shields += self.shield_regeneration_per_sec * frame_t;
 
         // Steer
         if is_key_down(KeyCode::Right) {
@@ -298,10 +463,24 @@ impl MainState {
         self.bullets.retain(|bullet| bullet.shot_at + 2.5 > game_t);
 
         let mut new_asteroids = Vec::new();
+        let mut colliding = false;
         for asteroid in self.asteroids.iter_mut() {
             // Asteroid/ship collision
             if (asteroid.pos - self.ship.pos).length() < asteroid.size + SHIP_HEIGHT / 3. {
-                return Some(Box::new(MenuState::Lost));
+                if !colliding && !self.colliding {
+                    if self.shields > 1. {
+                        self.shields -= 1.;
+                        self.invulnerable_until = game_t + 0.3;
+                    }
+
+                    if game_t < self.invulnerable_until {
+                        let collision_vec = asteroid.pos - self.ship.pos;
+                        self.ship.vel -= 6. * self.ship.vel.project_onto(collision_vec);
+                    } else {
+                        return Some(Box::new(MenuState::Lost));
+                    }
+                }
+                colliding = true;
             }
 
             let mut hit_vel = None;
@@ -359,6 +538,8 @@ impl MainState {
             }
         }
 
+        self.colliding = colliding;
+
         // generate new asteroids
         if self.last_asteroid_generate_pos.distance(self.ship.pos) > 50. {
             let gen_vec = self.ship.pos - self.last_asteroid_generate_pos;
@@ -398,6 +579,21 @@ impl MainState {
             self.last_asteroid_generate_pos = self.ship.pos;
         }
 
+        // generate hostile asteroids
+        self.new_hostile_asteroids += self.hostile_asteroids_per_second * frame_t;
+
+        while self.new_hostile_asteroids >= 1. {
+            self.new_hostile_asteroids -= 1.;
+
+            let pos = self.ship.pos
+                + Vec2::from_angle(rand::gen_range(0.0_f32, 360.).to_radians())
+                    * rand::gen_range(screen_diag_length, screen_diag_length * 2.);
+            let mut asteroid = Asteroid::new(pos, &self.asteroid_shapes);
+            asteroid.vel = (self.ship.pos - pos).normalize()
+                * rand::gen_range(1., self.max_hostile_asteroid_speed);
+            new_asteroids.push(asteroid);
+        }
+
         // Remove the collided objects
         self.bullets
             .retain(|bullet| bullet.shot_at + BULLET_LIFETIME > game_t && !bullet.collided);
@@ -414,6 +610,11 @@ impl MainState {
             self.xp -= self.next_level_xp;
             self.next_level_xp = 1 + (self.next_level_xp as f32 * 1.2) as usize;
             self.rocket_stockpile += rand::gen_range(0, 4);
+
+            self.hostile_asteroids_per_second *= 1.25;
+            self.max_hostile_asteroid_speed *= 1.1;
+
+            self.level_up = Some(LevelUp::new(3, self.available_upgrades.clone()))
         }
 
         // You win?
@@ -514,6 +715,21 @@ impl MainState {
             self.ship.pos.y + rotation.sin() * SHIP_BASE / 2. + rotation.cos() * SHIP_HEIGHT / 2.,
         );
         draw_triangle_lines(v1, v2, v3, 2., BLACK);
+        if self.shields >= 1. {
+            let mut shield_color = if self.game_t < self.invulnerable_until {
+                RED
+            } else {
+                DARKBLUE
+            };
+            shield_color.a = 0.5;
+            draw_circle_lines(
+                self.ship.pos.x + rand::gen_range(-1., 1.),
+                self.ship.pos.y + rand::gen_range(-1., 1.),
+                0.9 * SHIP_HEIGHT,
+                1.5,
+                shield_color,
+            );
+        }
 
         set_default_camera();
 
@@ -545,14 +761,46 @@ impl MainState {
         );
 
         draw_text(
-            &format!("Missiles: {}", self.rocket_stockpile),
+            &format!(
+                "Missiles: {}  Shields: {}",
+                self.rocket_stockpile, self.shields as usize
+            ),
             30.,
             60.,
             30.,
             BLACK,
         );
 
-        if self.paused {
+        if let Some(level_up) = &self.level_up {
+            let uc = level_up.upgrade_choices.len();
+
+            let th = 60.;
+            let h = 20. + th + (80 * uc) as f32;
+            let w = 600.;
+
+            let x = screen_width() / 2. - w / 2.;
+            let y = screen_height() / 2. - h / 2.;
+
+            draw_rectangle(x, y, w, h, GRAY);
+
+            draw_centered_text("Level Up!", screen_width() / 2., y + 20., 60., BLACK);
+
+            for (idx, upgrade) in level_up.upgrade_choices.iter().enumerate() {
+                let is_selected = idx == level_up.selected;
+                let idx = idx as f32;
+                draw_rectangle(x + 20., y + idx * 80. + th + 20., w - 40., 60., BLACK);
+                let color = if is_selected { LIGHTGRAY } else { GRAY };
+                draw_rectangle(x + 25., y + idx * 80. + th + 25., w - 50., 50., color);
+
+                draw_centered_text(
+                    &(upgrade.desc)(self),
+                    screen_width() / 2.,
+                    y + idx * 80. + th + 45.,
+                    50.,
+                    BLACK,
+                )
+            }
+        } else if self.paused {
             draw_rectangle(
                 screen_width() / 2. - 100.,
                 screen_height() / 2. - 30.,
