@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     collections::hash_map::DefaultHasher,
     f32::consts::PI,
     hash::{Hash, Hasher},
@@ -787,7 +787,8 @@ impl MainState {
         while self.xp >= self.next_level_xp {
             self.level += 1;
             self.xp -= self.next_level_xp;
-            self.next_level_xp = ((self.next_level_xp as f32 * 1.1) as usize).max(self.next_level_xp + 1);
+            self.next_level_xp =
+                ((self.next_level_xp as f32 * 1.1) as usize).max(self.next_level_xp + 1);
 
             self.hostile_asteroids_per_second *= 1.2;
             self.max_hostile_asteroid_speed *= 1.08;

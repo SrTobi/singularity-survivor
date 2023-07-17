@@ -7,7 +7,6 @@ use super::main_state::MainState;
 pub enum MenuState {
     Initial,
     Lost,
-    Won,
 }
 
 impl GameState for MenuState {
@@ -18,7 +17,7 @@ impl GameState for MenuState {
         let text = match self {
             MenuState::Initial => "Welcome to Asterodis. Press [enter] to play.",
             MenuState::Lost => "Game Over. Press [enter] to play again.",
-            MenuState::Won => "You Win!. Press [enter] to play again.",
+            //MenuState::Won => "You Win!. Press [enter] to play again.",
         };
 
         let text_size = measure_text(text, None, font_size as _, 1.0);
